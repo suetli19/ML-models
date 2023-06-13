@@ -1,0 +1,211 @@
+#exploring different ML models which can predict binary health outcome with the highest classification accuracy. 
+# XGBoost, SVM, ANN and RF
+
+#load library
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(xgboost)
+library(pROC)
+library(randomForest)
+library(neuralnet)
+
+#set working directory where all the input files are located
+setwd("~/home/suetli/gmhi")
+
+#input data for ML models
+rf.data.shotgun.sig.diseases.gi <- read.csv('rf.data.shotgun.sig.diseases.gi.csv') 
+  %>% column_to_rownames("X")
+  
+#separate input dataset to training and testing set
+set.seed(123) #for reproducibility
+intrain.shotgun.gi <- createDataPartition(y = rf.data.shotgun.sig.diseases.gi$response.shotgun.sig.diseases, 
+                                          p= 0.8, list = FALSE)
+
+training.shotgun.gi <- rf.data.shotgun.sig.diseases.gi[intrain.shotgun.gi,]  
+
+testing.shotgun.gi <- rf.data.shotgun.sig.diseases.gi[-intrain.shotgun.gi,]
+
+
+# 1. xgboost 
+set.seed(123)
+xgboost.shotgun.gi <- train(
+  response.shotgun.sig.diseases ~., 
+  data = training.shotgun.gi, 
+  method = "xgbTree",
+  trControl = trainControl("repeatedcv", number = 10, repeats = 3),  
+  preProcess = c("center", "scale"), tuneLength = 10)
+
+test.xgboost.shotgun.gi <- predict(xgboost.shotgun.gi, newdata = testing.shotgun.gi)
+
+# Compute model prediction accuracy rate
+mean(test.xgboost.shotgun.gi == testing.shotgun.gi$response.shotgun.sig.diseases)
+
+
+#confusion matrix accuracy
+confusionMatrix(test.xgboost.shotgun.gi, as.factor(testing.shotgun.gi$response.shotgun.sig.diseases))
+
+
+#ROC curve and AUC
+roc.xgboost.test.shotgun.gi <- 
+  roc(response = testing.shotgun.gi$response.shotgun.sig.diseases, 
+      predictor = as.numeric(test.xgboost.shotgun.gi))
+      
+plot(roc.xgboost.test.shotgun.gi, add = FALSE,col = "red", print.auc=TRUE)
+
+# estimate variable importance
+importance.xgb.shotgun.gi <- varImp(xgboost.shotgun.gi, scale=FALSE)
+
+# summarize importance
+print(importance.xgb.shotgun.gi)
+
+# plot importance
+plot(importance.xgb.shotgun.gi, top = 50, main = "Top 50 species importance - XGBoost GI")
+
+
+
+# 2. SVM 
+set.seed(123)                      
+svm.shotgun.gi <- train(response.shotgun.sig.diseases ~., data = training.shotgun.gi, method = "svmLinear", trControl=trainControl("repeatedcv", number = 10, repeats = 3),preProcess = c("center", "scale"),
+                            tuneLength = 10)
+
+
+test.svm.shotgun.gi <- predict(svm.shotgun.gi, newdata = testing.shotgun.gi)
+
+#confusion matrix accuracy for svm
+confusionMatrix(test.svm.shotgun.gi, as.factor(testing.shotgun.gi$response.shotgun.sig.diseases))
+
+
+#ROC curve and AUC
+roc.svm.test.shotgun.gi <- 
+  roc(response = testing.shotgun.gi$response.shotgun.sig.diseases, 
+      predictor = as.numeric(test.svm.shotgun.gi))
+      
+plot(roc.svm.test.shotgun.gi, add = FALSE,col = "red", print.auc=TRUE)
+
+
+# summarize importance
+print(importance.svm.shotgun.gi)
+
+
+# plot importance
+plot(importance.svm.shotgun.gi, top = 50, main = "Top 50 species importance - SVM GI")
+
+importance.svm.shotgun.gi.df <- as.data.frame(importance.svm.shotgun.gi[["importance"]])
+
+importance.svm.shotgun.gi.df <- importance.svm.shotgun.gi.df %>% 
+  rownames_to_column('feature') %>% 
+  arrange(desc(Healthy)) %>% 
+  slice_head(n=50)
+
+
+ 
+ # 3. ANN 
+ training.scaled.shotgun <- training.shotgun.gi %>%
+  mutate(response.1.shotgun = if_else(response.shotgun.sig.diseases == "Healthy", as.integer(1), as.integer(0)))
+
+testing.scaled.shotgun <- testing.shotgun.gi %>%
+  mutate(response.1.shotgun = if_else(response.shotgun.sig.diseases == "Healthy", as.integer(1), as.integer(0)))
+
+training.scaled.shotgun <- training.scaled.shotgun[, -1]  
+testing.scaled.shotgun <- testing.scaled.shotgun[, -1]  
+training.scaled.shotgun <- as.data.frame(scale(training.scaled.shotgun))  
+testing.scaled.shotgun <- as.data.frame(scale(testing.scaled.shotgun))  
+
+#create function to normalize
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+training.scaled.shotgun <- as.data.frame(lapply(training.scaled.shotgun, normalize))
+testing.scaled.shotgun <- as.data.frame(lapply(testing.scaled.shotgun, normalize))
+
+
+set.seed(123)
+ann.shotgun.gi <- neuralnet(response.1.shotgun~., data=training.scaled.shotgun, hidden=c(3,5), linear.output=FALSE, threshold=0.01)
+
+ann.shotgun.gi$result.matrix
+
+#Test the resulting output
+nn.results.shotgun <- compute(ann.shotgun.gi, testing.scaled.shotgun)
+
+results.shotgun <- data.frame(actual = testing.scaled.shotgun$response.1.shotgun, prediction = nn.results.shotgun$net.result)
+
+roundedresults.shotgun <- sapply(results.shotgun,round,digits=0)
+roundedresultsdf.shotgun = data.frame(roundedresults.shotgun)
+
+cm.ann.shotgun <- table(roundedresultsdf.shotgun$actual, roundedresultsdf.shotgun$prediction)
+
+sum(diag(cm.ann.shotgun)) / sum(cm.ann.shotgun)
+
+roc_ann_test.shotgun <- roc(response = testing.scaled.shotgun$response.1.shotgun, predictor =as.numeric(nn.results.shotgun$net.result))
+
+plot(roc_ann_test.shotgun, add = FALSE,col = "red", print.auc=TRUE)
+
+#confusion matrix accuracy for ann
+prediction.shotgun <- roundedresultsdf.shotgun$prediction %>% as.factor()
+
+roundedresultsdf.shotgun$actual <- as.factor(roundedresultsdf.shotgun$actual)
+
+confusionMatrix(prediction.shotgun, roundedresultsdf.shotgun$actual)
+
+# Compute model prediction accuracy rate
+mean(prediction.shotgun == roundedresultsdf.shotgun$actual)
+
+plot(ann.shotgun.gi)
+
+
+# 4. Random forest
+# automatically select features using recursive feature elimination (RFE)
+# define the control using a random forest selection function
+set.seed(123)
+control <- rfeControl(functions=rfFuncs, method="repeatedcv", number=10, repeats = 3)
+
+# run the RFE algorithm 
+set.seed(123)
+rfe.rf.shotgun.gi <- rfe(training.shotgun.gi[,2:223], training.shotgun.gi[,1], sizes=c(2:223), rfeControl=control, preProcess #= c("center", "scale"), tuneLength = 10, ntree=1000)
+
+# summarize the results
+print(rfe.rf.shotgun.gi)
+
+# list the chosen features
+predictors(rfe.rf.shotgun.gi)
+
+# plot the results
+plot(rfe.rf.shotgun.gi, type=c("g", "o"))
+
+#try to use the rfe model to predict testing set
+test.rfe.rf.shotgun.gi <- predict(rfe.rf.shotgun.gi, newdata = testing.shotgun.gi)
+
+## Post prediction
+postResample(predict(rfe.rf.shotgun.gi, testing.shotgun.gi), testing.shotgun.gi$response.shotgun.sig.diseases)
+
+#confusion matrix accuracy for rf
+confusionMatrix(test.rfe.rf.shotgun.gi$pred, testing.shotgun.gi$response.shotgun.sig.diseases)
+
+#ROC curve and AUC for RF model
+roc_rfe.rf.shotgun.gi <- roc(response = testing.shotgun.gi$response.shotgun.sig.diseases, predictor =as.numeric(test.rfe.rf.shotgun.gi$pred))
+
+plot(roc_rfe.rf.shotgun.gi, add = FALSE,col = "red", print.auc=TRUE)
+
+#plot variable/feature importance
+importance.rfe.rf.shotgun.gi <- data.frame(feature = row.names(varImp(rfe.rf.shotgun.gi))[1:50],
+                                           importance = varImp(rfe.rf.shotgun.gi)[1:50, 1])
+
+head(importance.rfe.rf.shotgun.gi, n = 50)
+
+#plot important features
+ggplot(data = importance.rfe.rf.shotgun.gi, aes(x = reorder(feature, -importance), y = importance, fill = "grey", color = "grey")) + 
+geom_bar(stat="identity", fill = "grey", color = "grey") + 
+labs(x = "Features", y = "Feature importance") + 
+geom_text(aes(label = round(importance, 2)), angle = 90, vjust=1, hjust=1, color="black", size=3) + 
+theme_bw() +
+theme(legend.position = "none") + 
+theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust=1)) + 
+ggtitle("Rank of top 50 feature importance") +
+theme(text=element_text(size=12))
+
+
+
+
+
+
