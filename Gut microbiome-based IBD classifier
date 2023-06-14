@@ -1,1 +1,118 @@
+#The objective of this analysis is to train Random Forest classifier model and select important features using recursive feature elimination (RFE) method using IBD data as training set. The model’s accuracy is compared using external Asian and Caucasian cohort.
+
+#load libraries
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(randomForest)
+library(pROC)
+
+#set working directory and import files
+setwd("~/vsl3_analysis/lda")
+edge_table_filt_rel <- read.csv('edge_table_filt_rel.csv') %>%
+  column_to_rownames('X') %>%
+  t() %>% as.data.frame() 
+
+metadata_iletis <- read.csv('metadata_ibd_healthy.csv') %>%
+column_to_rownames('X')
+
+taxa_iletis <- read.csv('taxa_ibd_healthy.csv') %>% 
+  column_to_rownames('feature')
+  
+#random forest
+#unscaled dataset
+
+Health_status <- as.factor(metadata_iletis$Disease_category)
+edge_table_filt_rel <- data.frame(Health_status, edge_table_filt_rel)
+
+set.seed(123)
+sample_lda <- sample(c(TRUE, FALSE), nrow(edge_table_filt_rel), replace=TRUE, prob=c(0.8,0.2))
+
+train <- edge_table_filt_rel[sample_lda, ]
+test <- edge_table_filt_rel[!sample_lda, ] 
+
+
+set.seed(123)
+control <- rfeControl(functions=rfFuncs, method="repeatedcv", number=10, repeats = 3)
+
+#run the RFE algorithm
+set.seed(123)
+rfe.rf.iletis <- rfe(train[,2:235], train[,1], sizes=c(2:235), rfeControl=control, preProcess = c("center", "scale"), tuneLength = 10, ntree=100)
+# summarize the results
+print(rfe.rf.iletis)
+
+
+# list the chosen features
+predictors(rfe.rf.iletis)
+
+
+# plot the results
+plot(rfe.rf.iletis, type=c("g", "o"))
+
+#try to use the rfe model to predict testing set
+test.rfe.rf.iletis <- predict(rfe.rf.iletis, newdata = test)
+
+## Post prediction
+postResample(predict(rfe.rf.iletis, test), test$Health_status)
+
+
+#confusion matrix accuracy for rf
+set.seed(123)
+confusionMatrix(test.rfe.rf.iletis$pred, test$Health_status)
+
+###test on Asian cohort
+#test on external validation set and test set 
+asian_abundance_merged <- read.csv('~/vsl3_analysis/lda/asian_abundance_merged.csv') %>% 
+  filter(!grepl("DRR", X)) %>%
+  mutate_at("Health_status", as.factor) %>%
+  column_to_rownames('X')
+
+test.rfe.rf.iletis.asian <- predict(rfe.rf.iletis, newdata = asian_abundance_merged)
+
+## Post prediction
+postResample(predict(rfe.rf.iletis, asian_abundance_merged), asian_abundance_merged$Health_status)
+
+#confusion matrix accuracy for rf
+set.seed(123)
+confusionMatrix(test.rfe.rf.iletis.asian$pred, asian_abundance_merged$Health_status)
+
+
+###test on western cohort
+#external validation set
+western_abundance_merged <- read.csv('~/vsl3_analysis/lda/western_abundance_merged.csv') %>%
+  column_to_rownames('X') %>%
+  mutate_at('Health_status_western', as.factor)
+
+test.rfe.rf.iletis.western <- predict(rfe.rf.iletis, newdata = western_abundance_merged)
+
+## Post prediction
+postResample(predict(rfe.rf.iletis, western_abundance_merged), western_abundance_merged$Health_status_western)
+
+#confusion matrix accuracy for rf
+set.seed(123)
+confusionMatrix(test.rfe.rf.iletis.western$pred, western_abundance_merged$Health_status_western)
+
+
+#plot variable/feature importance
+#retrieve selected features from model
+importance.rfe.rf.iletis <- data.frame(feature = row.names(varImp(rfe.rf.iletis))[1:36], importance = varImp(rfe.rf.iletis)[1:36, 1])
+
+#upload taxa table
+taxa_table <- read.csv('taxa_table.csv') %>%
+  dplyr::select(-X)
+
+#merge with taxa for selected features
+importance.rfe.rf.iletis <- importance.rfe.rf.iletis %>%
+  merge(taxa_table[, c(1,11)], by = "feature", all.x = TRUE) %>%
+  unite(Taxa, c(feature, taxon), sep = " | ")
+
+#plot barplot with feature importance
+ggplot(data = importance.rfe.rf.iletis, aes(x = reorder(Taxa, -importance), y = importance, fill = "grey", color = "grey")) + geom_bar(stat="identity", fill = "grey", color = "grey") + labs(x = "Features", y = "Feature importance") + geom_text(aes(label = round(importance, 2)), angle = 90, vjust=1, hjust=1, color="black", size=3) + theme_bw() + theme(legend.position = "none") + theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust=1)) + ggtitle("Rank of selected feature importance") + theme(text=element_text(size=12))
+
+
+
+
+
+
+  
 
