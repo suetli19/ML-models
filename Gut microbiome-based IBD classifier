@@ -107,7 +107,15 @@ importance.rfe.rf.iletis <- importance.rfe.rf.iletis %>%
   unite(Taxa, c(feature, taxon), sep = " | ")
 
 #plot barplot with feature importance
-ggplot(data = importance.rfe.rf.iletis, aes(x = reorder(Taxa, -importance), y = importance, fill = "grey", color = "grey")) + geom_bar(stat="identity", fill = "grey", color = "grey") + labs(x = "Features", y = "Feature importance") + geom_text(aes(label = round(importance, 2)), angle = 90, vjust=1, hjust=1, color="black", size=3) + theme_bw() + theme(legend.position = "none") + theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust=1)) + ggtitle("Rank of selected feature importance") + theme(text=element_text(size=12))
+ggplot(data = importance.rfe.rf.iletis, aes(x = reorder(Taxa, -importance), y = importance, fill = "grey", color = "grey")) + 
+  geom_bar(stat="identity", fill = "grey", color = "grey") + 
+  labs(x = "Features", y = "Feature importance") + 
+  geom_text(aes(label = round(importance, 2)), angle = 90, vjust=1, hjust=1, color="black", size=3) + 
+  theme_bw() + 
+  theme(legend.position = "none") + 
+  theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust=1)) + 
+  ggtitle("Rank of selected feature importance") + 
+  theme(text=element_text(size=12))
 
 
 
