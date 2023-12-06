@@ -1,3 +1,18 @@
 This script contains the codes used to generate IBD predictive models using SIAMCAT R package (https://konradzych.github.io/SIAMCAT/articles/SIAMCAT_vignette.html)
 
+#load libraries
+library(tidyverse)
+library(ggplot2)
+library(phyloseq)
+library(reshape2)
+library(vegan)
+library(ggsci)
+library(ggsignif)
+library(gridExtra)
+library(microbiome)
+library(microbiomeMarker)
+library(SIAMCAT)
+
+
+
 
