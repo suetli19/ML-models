@@ -1,6 +1,10 @@
 This script contains the codes used to generate IBD predictive models using SIAMCAT R package (https://konradzych.github.io/SIAMCAT/articles/SIAMCAT_vignette.html)
 
-#load libraries
+The aim of this project is to used our in-house Singaporean IBD dataset to train a predictive model which can accurately predict IBD in Asian cohorts. Then, we compare the accuracy of our trained Singaporean model (training set) in predicting external Western and Asian IBD cohort (validation set) using the features/taxa selected by SIAMCAT. 
+
+*Note: The 16S data (V3-V4) is processed using PAPRICA (https://www.polarmicrobes.org/introducing-paprica/) to annotate taxa,  replacing DADA2 to generate taxa abundance table ('Edge'), taxa classification table and functional pathways (pathway data will not be used in this analysis). 
+
+#load libraries required to run this analysis
 library(tidyverse)
 library(ggplot2)
 library(phyloseq)
@@ -12,6 +16,526 @@ library(gridExtra)
 library(microbiome)
 library(microbiomeMarker)
 library(SIAMCAT)
+
+
+# first, we upload Asian metadata (from public dataset downloaded from NCBI) and combine them into one.
+
+# Singapore 
+metadata_sg <- read.csv('./asian_iletis/leftover_healthy_amili89.csv') %>%
+  select(Health_status, Age, Gender, BMI, X16S_AnalysisID) %>%
+  dplyr::rename(Sample = X16S_AnalysisID) %>%
+  mutate(BMI = as.numeric(BMI), Country = "Singapore") 
+
+# China
+metadata_chinese <- read.delim('./asian_iletis/PRJNA835157_chinese.txt', sep = ',') %>% 
+  filter(Isolation_Source %in% "feces") %>%
+  select(Run, Host_age, host_sex) %>%
+  mutate(Health_status = "IBD", BMI = NA, Country = "China") %>%
+  dplyr::rename(Sample = Run, Age = Host_age, Gender = host_sex)
+
+# Korea
+metadata_korean <- read.delim('./asian_iletis/PRJNA968150_korean.txt', sep = ',') %>%
+  filter(Sample.Name %in% "IBD microbiome") %>%
+  select(Run) %>%
+  dplyr::rename(Sample = Run) %>%
+  mutate(Health_status = "IBD", Age = NA, Gender = NA, BMI = NA, Country = "Korea")
+
+# merge into one Asian metadata
+metadata_asian <- bind_rows(metadata_chinese, metadata_korean, metadata_sg)
+
+
+#upload asian edge table (PAPRICA output), this abundance table output (combined all asian datasets) has been preprocessed internally which will then be used to build our model. 
+Edge_asian <- read.csv('./asian_iletis/iletis_edge_bind_asian.csv') %>%
+  select(-X) %>%
+  mutate(V1 = gsub(".16S.exp.", "", V1)) %>%
+  filter(V1 %in% metadata_asian$Sample) %>%
+   distinct(V1, .keep_all = TRUE) %>%
+  column_to_rownames('V1') %>%
+  t() %>%
+  as.data.frame() %>%
+   replace(is.na(.), 0)
+
+# from the same paprica output, we upload the taxa classification table
+Taxa_asian <- read.csv('./asian_iletis/iletis_taxa_bind_asian.csv') %>%
+  setNames(.[1,]) %>%
+  .[-1,] 
+
+colnames(Taxa_asian)[1] <- "Index"
+colnames(Taxa_asian)[2] <- "Edge"
+
+rownames(Taxa_asian) <- NULL
+
+Taxa_asian <- Taxa_asian %>%
+  select(-Index) %>%
+  filter(!duplicated(Edge)) %>%
+  filter(!is.na(Edge)) %>%
+  column_to_rownames("Edge") %>%
+  dplyr::rename(Kingdom = superkingdom, Phylum = phylum, Class = class, Order = order, Family = family, Genus = genus, Species = species) %>%
+  select(-clade, -strain, -taxon) %>%
+  mutate_all(na_if, "") %>%
+  replace_na(list(Order = 'Unclassified', Family = 'Unclassified', Genus = 'Unclassified', Species = 'Unclassified'))
+
+#after all required tables have been uploaded, we create a phyloseq object
+OTU <- otu_table(as.matrix(Edge_asian), taxa_are_rows = T)
+
+TAXA <- tax_table(as.matrix(Taxa_asian))
+
+metadata_asian <- column_to_rownames(metadata_asian, "Sample")
+
+SAMPLE <- sample_data(metadata_asian)
+
+ps.asian <- phyloseq(OTU, TAXA, SAMPLE)
+
+# transform the absolute abundance to relative abundance
+psr.asian  = transform_sample_counts(ps.asian, function(x) x / sum(x) )
+psr.asian
+
+#remove low abundant taxa with abundances below 0.0001 
+psr.asian.filt <- phyloseq::genefilter_sample(psr.asian, filterfun_sample(function(x) x >= 0.0001))
+
+psr.asian.filt <- prune_taxa(psr.asian.filt, psr.asian)
+psr.asian.filt
+
+# we need a correct formatting of dataframes in order to create a siamcat object and build our model, thus we need to re-adjust the input dataframes that fits into siamcat object
+Taxa_sc <- read.csv('iletis_taxa_bind.csv') %>%
+  setNames(.[1,]) %>%
+  .[-1,] 
+
+colnames(Taxa_sc)[1] <- "Index"
+colnames(Taxa_sc)[2] <- "Edge"
+
+rownames(Taxa_sc) <- NULL
+
+Taxa_sc <- Taxa_sc %>%
+  select(-Index) %>%
+  filter(!duplicated(Edge)) %>%
+  filter(!is.na(Edge)) %>%
+  column_to_rownames("Edge") %>%
+  dplyr::rename(Kingdom = superkingdom, Phylum = phylum, Class = class, Order = order, Family = family, Genus = genus, Species = species) %>%
+  mutate_all(na_if, "") %>%
+  replace_na(list(Order = 'Unclassified', Family = 'Unclassified', Genus = 'Unclassified', Species = 'Unclassified', clade = 'Unclassified', strain = 'Unclassified')) %>%
+  rownames_to_column('Edge') %>%
+  mutate(Edge2 = Edge, Taxon2 = taxon) %>%
+  unite(Taxa, Edge2, Taxon2, sep = ' | ') %>% 
+  column_to_rownames('Taxa')
+
+
+#upload metadata that will be used as training set for the model (Singaporean IBD dataset)
+metadata_updated165 <- read.csv('metadata_ibd_healthy_updated165.csv') %>%
+  mutate(X16S_AnalysisID = gsub("-", "", X16S_AnalysisID))
+
+#upload edge table that will be used as training set for the model (Singaporean IBD dataset)
+Edge <- read.csv('iletis_edge_bind.csv') %>%
+  select(-X, -Sample) %>%
+  mutate(V1 = gsub(".16S.exp.", "", V1)) %>%
+  filter(V1 %in% metadata_updated165$X16S_AnalysisID) %>%
+  column_to_rownames('V1') %>%
+  t() %>%
+  as.data.frame() %>%
+   replace(is.na(.), 0)
+
+#upload taxa table that will be used as training set for the model (Singapore IBD dataset)
+Taxa <- read.csv('iletis_taxa_bind.csv') %>%
+  setNames(.[1,]) %>%
+  .[-1,] 
+
+colnames(Taxa)[1] <- "Index"
+colnames(Taxa)[2] <- "Edge"
+
+rownames(Taxa) <- NULL
+
+Taxa <- Taxa %>%
+  select(-Index) %>%
+  filter(!duplicated(Edge)) %>%
+  filter(!is.na(Edge)) %>%
+  column_to_rownames("Edge") %>%
+  dplyr::rename(Kingdom = superkingdom, Phylum = phylum, Class = class, Order = order, Family = family, Genus = genus, Species = species) %>%
+  select(-clade, -strain, -taxon) %>%
+  mutate_all(na_if, "") %>%
+  replace_na(list(Order = 'Unclassified', Family = 'Unclassified', Genus = 'Unclassified', Species = 'Unclassified'))
+
+
+# create Singaporean phyloseq
+OTU <- otu_table(as.matrix(Edge), taxa_are_rows = T)
+
+TAXA <- tax_table(as.matrix(Taxa))
+
+metadata_updated165 <- column_to_rownames(metadata_updated165, "X16S_AnalysisID")
+
+SAMPLE <- sample_data(metadata_updated165)
+
+ps <- phyloseq(OTU, TAXA, SAMPLE)
+
+
+# reformat the species level so that siamcat model can select features based on the species --training set
+Edge_filt <- as(otu_table(ps), 'matrix') %>% 
+  as.data.frame() %>%
+  rownames_to_column('Edge') %>%
+  merge(Taxa_sc, by = "Edge") %>%
+  select(-Edge, -Kingdom, -Phylum, -Class, -Order, -Family, -Genus, -clade, -strain, -taxon)
+
+# sum the abundances of the same species
+psrmelt.species <- aggregate(. ~ Species, Edge_filt, sum)
+
+psrmelt.species <- column_to_rownames(psrmelt.species, 'Species')
+
+
+# do the same for asian dataset
+Edge_filt.asian <- as(otu_table(ps.asian), 'matrix') %>% 
+  as.data.frame() %>%
+  rownames_to_column('Edge') %>%
+  merge(Taxa_sc, by = "Edge") %>%
+  select(-Edge, -Kingdom, -Phylum, -Class, -Order, -Family, -Genus, -clade, -strain, -taxon)
+
+psrmelt.species.asian <- aggregate(. ~ Species, Edge_filt.asian, sum)
+
+psrmelt.species.asian <- column_to_rownames(psrmelt.species.asian, 'Species')
+
+# get the same species names based on the asian species
+psrmelt.species <- psrmelt.species %>%
+  filter(rownames(.) %in% rownames(psrmelt.species.asian))
+
+# calculate the proportion abundance for Singaporean and Asian validation sets
+psrmelt.species <- prop.table(as.matrix(psrmelt.species), 2)
+
+psrmelt.species.asian <- prop.table(as.matrix(psrmelt.species.asian), 2)
+
+
+# create a siamcat object for species level for asian cohort (Abundances summed from total of each species group)
+set.seed(123)
+sc.obj.species.asian <- siamcat(feat= psrmelt.species.asian,
+    label='Health_status', case='IBD',
+    meta=metadata_asian)
+
+show(sc.obj.species.asian)
+
+# upload the preprocessed phyloseq object for Singaporean training set 
+psr.filt <- readRDS("~/AMILI_2022/hpc2_projects/vsl3_analysis/ILETIS_NEW_020823/psr.filt.rds")
+
+metadata163 <- as(sample_data(psr.filt), 'data.frame')
+
+# select only Health status and Disease category (IBD vs healthy)
+metadata163.sc <- metadata163 %>%
+  select(Health_status, Disease_category)
+
+
+# create siamcat object for Singaporean training dataset
+set.seed(123)
+sc.obj.species <- siamcat(feat=psrmelt.species, meta=metadata163.sc,
+    label='Health_status', case='IBD')
+
+
+# filter low abundance features (taxa) by removing features less than 0.001 abundance
+set.seed(123)
+sc.obj.species <- filter.features(
+    sc.obj.species,
+    filter.method = 'abundance',
+    cutoff = 0.001,
+    rm.unmapped = TRUE,
+    verbose=2
+)
+
+
+# normalize the abundance features
+set.seed(123)
+sc.obj.species <- normalize.features(
+    sc.obj.species,
+    norm.method = "log.std",
+    norm.param = list(log.n0 = 1e-06, sd.min.q = 0.1),
+    verbose = 2
+)
+
+
+# create data split
+set.seed(123)
+sc.obj.species <-  create.data.split(
+    sc.obj.species,
+    num.folds = 5,
+    num.resample = 5
+)
+
+
+# train LASSO model
+set.seed(123)
+sc.obj.species <- train.model(
+    sc.obj.species,
+    method = "lasso"
+)
+
+
+# make and evaluate cross-validation predictions using the testing set (same Singaporean dataset)
+set.seed(123)
+sc.obj.species <- make.predictions(sc.obj.species)
+
+sc.obj.species <-  evaluate.predictions(sc.obj.species)
+
+
+# normalize features for asian dataset
+set.seed(123)
+sc.obj.species.asian <- normalize.features(sc.obj.species.asian,
+    norm.param=norm_params(sc.obj.species),
+    feature.type='original',
+    verbose = 2)
+
+
+# make holdout predictions for external asian dataset
+set.seed(123)
+sc.obj.species.asian <- make.predictions(
+    siamcat = sc.obj.species,
+    siamcat.holdout = sc.obj.species.asian,
+    normalize.holdout = FALSE)
+
+# evaluate asian holdout predictions
+set.seed(123)
+sc.obj.species.asian <- evaluate.predictions(sc.obj.species.asian)
+
+
+# generate evaluation and interpretation plots
+model.evaluation.plot('SG-IBD'=sc.obj.species,
+    'Asian-IBD'=sc.obj.species.asian,
+    colours=c('dimgrey', 'orange'))
+
+model.interpretation.plot(sc.obj.species, fn.plot = "interpretation.species.pdf",
+    consens.thres = 0.5, limits = c(-3, 3), heatmap.type = 'zscore')
+
+    
+
+# now, we can predict for western validation cohort using our built model
+#western cohort metadata
+metadata_west <- read.csv('./western_iletis/metadata_public_ibd_West_updated.csv') %>%
+  select(-X, -Disease_category, -BioProject) %>%
+  dplyr::rename(Sample = Run)
+
+
+#upload western edge table from paprica output
+Edge_western <- read.csv('./western_iletis/iletis_edge_bind_western.csv') %>%
+  select(-X) %>%
+  mutate(V1 = gsub(".16S.exp.", "", V1)) %>%
+  filter(V1 %in% metadata_west$Sample) %>%
+   distinct(V1, .keep_all = TRUE) %>%
+  column_to_rownames('V1') %>%
+  t() %>%
+  as.data.frame() %>%
+   replace(is.na(.), 0)
+
+
+#upload western taxa table from paprica output
+Taxa_western <- read.csv('./western_iletis/iletis_taxa_bind_western.csv') %>%
+  setNames(.[1,]) %>%
+  .[-1,] 
+
+colnames(Taxa_western)[1] <- "Index"
+colnames(Taxa_western)[2] <- "Edge"
+
+rownames(Taxa_western) <- NULL
+
+Taxa_western <- Taxa_western %>%
+  select(-Index) %>%
+  filter(!duplicated(Edge)) %>%
+  filter(!is.na(Edge)) %>%
+  column_to_rownames("Edge") %>%
+  dplyr::rename(Kingdom = superkingdom, Phylum = phylum, Class = class, Order = order, Family = family, Genus = genus, Species = species) %>%
+  select(-clade, -strain, -taxon) %>%
+  mutate_all(na_if, "") %>%
+  replace_na(list(Order = 'Unclassified', Family = 'Unclassified', Genus = 'Unclassified', Species = 'Unclassified'))
+
+
+# create phyloseq object for western validation cohort
+OTU <- otu_table(as.matrix(Edge_western), taxa_are_rows = T)
+
+TAXA <- tax_table(as.matrix(Taxa_western))
+
+metadata_west <- column_to_rownames(metadata_west, "Sample")
+
+SAMPLE <- sample_data(metadata_west)
+
+ps.west <- phyloseq(OTU, TAXA, SAMPLE)
+
+
+
+Edge_filt.west <- as(otu_table(ps.west), 'matrix') %>% 
+  as.data.frame() %>%
+  rownames_to_column('Edge') %>%
+  merge(Taxa_sc, by = "Edge") %>%
+  select(-Edge, -Kingdom, -Phylum, -Class, -Order, -Family, -Genus, -clade, -strain, -taxon)
+
+
+# sum the abundances based on different groups of species
+psrmelt.species.western <- aggregate(. ~ Species, Edge_filt.west, sum)
+
+psrmelt.species.western <- column_to_rownames(psrmelt.species.western, 'Species')
+
+
+#add zero abundance to species not available in western dataset based on the asian and cross-validation dataset
+psrmelt.species.western.new <- psrmelt.species.western %>%
+  filter(rownames(.) %in% rownames(psrmelt.species))
+
+additional <- psrmelt.species %>%
+ filter(!rownames(.) %in% rownames(psrmelt.species.western.new)) %>% mutate_all(~ 0) %>%
+ bind_rows(psrmelt.species.western.new) %>%
+  t() %>% as.data.frame() %>%
+  filter(rownames(.) %in% colnames(psrmelt.species.western.new)) %>% 
+  replace(is.na(.), 0) %>%
+  t() %>% as.data.frame()
+
+psrmelt.species.western <- prop.table(as.matrix(additional), 2)
+
+
+# create siamcat object for species level for western validation cohort
+set.seed(123)
+sc.obj.species.western <- siamcat(feat= psrmelt.species.western,
+    label='Health_status', case='IBD',
+    meta=metadata_west)
+
+show(sc.obj.species.western)
+
+
+# normalize features
+set.seed(123)
+sc.obj.species.western <- normalize.features(sc.obj.species.western,
+    norm.param=norm_params(sc.obj.species),
+    feature.type='original',
+    verbose = 2)
+
+# make predictions based on the built model and evaluate the predictions
+set.seed(123)
+sc.obj.species.western <- make.predictions(
+    siamcat = sc.obj.species,
+    siamcat.holdout = sc.obj.species.western,
+    normalize.holdout = FALSE)
+
+set.seed(123)
+sc.obj.species.western <- evaluate.predictions(sc.obj.species.western)
+
+
+# generate evaluation plots showing AUC for all cross-valdidation, asian and western validation datasets
+model.evaluation.plot('SG-IBD'=sc.obj.species,
+    'Asian-IBD'=sc.obj.species.asian,
+    'Western-IBD'=sc.obj.species.western,
+    colours=c('dimgrey', 'orange', 'lightblue'), fn.plot = "AUC_curve_siamcat.pdf")
+
+
+
+#calculate sensitivity and specificity from roc.all retrieved from siamcat object
+sensitivity <- sc.obj.species@eval_data[["roc.all"]][[1]][["sensitivities"]] %>% as.data.frame()
+
+mean(sensitivity$.)
+
+
+specificity <- sc.obj.species@eval_data[["roc.all"]][[1]][["specificities"]] %>% as.data.frame() %>%
+  rename_with(.cols = 1, ~"value")%>%
+  mutate(value_1 = 1 - value)
+
+mean(specificity$value)
+
+
+
+# do the same for asian validation cohort
+sensitivity.asian <- sc.obj.species.asian@eval_data[["roc.all"]][[1]][["sensitivities"]] %>%
+  as.data.frame() %>%
+  rename_with(.cols = 1, ~"value")
+
+mean(sensitivity.asian$value)
+
+
+#asian
+specificity.asian <- sc.obj.species.asian@eval_data[["roc.all"]][[1]][["specificities"]] %>% as.data.frame() %>%
+  rename_with(.cols = 1, ~"value")
+
+mean(specificity.asian$value)
+
+
+# do the same for western validation cohort
+sensitivity.western <- sc.obj.species.western@eval_data[["roc.all"]][[1]][["sensitivities"]] %>%
+  as.data.frame() %>%
+  rename_with(.cols = 1, ~"value")
+
+mean(sensitivity.western$value)
+
+
+specificity.western <- sc.obj.species.western@eval_data[["roc.all"]][[1]][["specificities"]] %>% as.data.frame() %>%
+  rename_with(.cols = 1, ~"value")
+
+mean(specificity.western$value)
+
+
+
+
+
+
+### Extra analysis to calculate ROC, true positive, true negative, false positive, false negative and accuracy
+
+# plot ROC Curves
+plot(
+    NULL,
+    xlim = c(0, 1),
+    ylim = c(0, 1),
+    xlab = 'False positive rate',
+    ylab = 'True positive rate',
+    type = 'n'
+)
+title('ROC curve for the model')
+abline(a = 0, b = 1, lty = 3)
+
+
+# for each resampled CV run
+eval_data <- eval_data(sc.obj.species)
+for (r in 1:length(eval_data$roc.all)) {
+    roc.c = eval_data$roc.all[[r]]
+    lines(1 - roc.c$specificities, roc.c$sensitivities, 
+        col = gray(runif(1, 0.2, 0.8)))
+}
+
+# mean ROC curve
+roc.summ = eval_data$roc.average[[1]]
+lines(1 - roc.summ$specificities,
+    roc.summ$sensitivities,
+    col = 'black',
+    lwd = 2)
+
+# plot CI
+x = as.numeric(rownames(roc.summ$ci))
+yl = roc.summ$ci[, 1]
+yu = roc.summ$ci[, 3]
+polygon(1 - c(x, rev(x)), c(yl, rev(yu)), col = '#88888844' , border = NA)
+
+
+
+#calculate from ev
+tp <- sc.obj.species@eval_data[["ev"]][["tp"]] %>% 
+  as.data.frame() %>%
+   rename_with(.cols = 1, ~"tp") 
+
+tn <- sc.obj.species@eval_data[["ev"]][["tn"]] %>% 
+  as.data.frame() %>%
+   rename_with(.cols = 1, ~"tn")
+
+fn <- sc.obj.species@eval_data[["ev"]][["fn"]] %>% 
+  as.data.frame() %>%
+   rename_with(.cols = 1, ~"fn")
+
+fp <- sc.obj.species@eval_data[["ev"]][["fp"]] %>% 
+  as.data.frame() %>%
+   rename_with(.cols = 1, ~"fp")
+
+
+sensit.specific <- bind_cols(fn, fp, tp, tn)
+
+sensit.specific_average <- sensit.specific %>% 
+  summarise(across(everything(), mean, na.rm = TRUE))
+
+
+
+#Sensitivity = TP/(TP + FN) = (Number of true positive assessment)/(Number of all positive assessment)
+(sensit.specific_average$tp)/((sensit.specific_average$tp) + (sensit.specific_average$fn))
+
+
+#Specificity = TN/(TN + FP) = (Number of true negative assessment)/(Number of all negative assessment)
+(sensit.specific_average$tn)/((sensit.specific_average$tn) + (sensit.specific_average$fp))
+
+
+#Accuracy = (TN + TP)/(TN+TP+FN+FP) = (Number of correct assessments)/Number of all assessments)
+(sensit.specific_average$tn) + (sensit.specific_average$tp)/((sensit.specific_average$tn) + (sensit.specific_average$tp) + (sensit.specific_average$fn) + (sensit.specific_average$fp))
 
 
 
